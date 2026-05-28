@@ -1,0 +1,15 @@
+Data fabric (2024)
+- centralized governence
+- technology focused
+- unified data environment
+- intergrated data management
+
+Data mesh (2025)
+- decentralized governance
+- domain oriented
+- agile and flexible
+
+Both
+- Enhance data accessibility
+- Aim to improve data usage
+- Focus on scalability
