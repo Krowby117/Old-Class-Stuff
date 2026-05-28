@@ -1,0 +1,25 @@
+#lang racket
+
+;(define (multBy5 x) (* x 5))
+;(map multBy5 (1 2 3 4 5))
+
+(define lst '(1 2 3 4 5))
+(map (lambda (x) (* x 5)) lst)
+
+;(map (lambda (x) (cons x '())) lst) ; list of lists
+
+; eq? x y        for memory locations
+; equal? x y     better for strings
+; = x y          best for nums
+
+(filter (lambda (num) (not (= 0 (modulo num 2)))) lst)
+(filter (lambda (num) (or (= 0 (modulo num 2)) (= 1 (modulo num 2)))) lst)
+
+;(foldl (lambda (n1 n2) (+ n1 n2)) 0 lst)
+(foldl + 0 lst)
+
+(foldl / 1 '(1 2))
+(foldr / 1 '(1 2))
+
+
+(foldl cons '() lst)

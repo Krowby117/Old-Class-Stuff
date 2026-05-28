@@ -1,0 +1,13 @@
+set alpha = 5
+ set beta = alpha
+set   gamma = 42 * beta
+set delta = 1  + 2 +  3+ 4 +5
+set epsilon=2*4*beta
+
+print 1 + 2
+print 3 * 5 * 2
+print alpha
+print beta + 1
+print gamma * 3
+print delta
+print 4 + epsilon + 2

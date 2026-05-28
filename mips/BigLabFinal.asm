@@ -1,0 +1,1609 @@
+######################################################################
+# 			     SNAKE!!!!                               #
+######################################################################
+#           Programmed by Shane Shafferman and Eric Deas             #
+######################################################################
+#	This program requires the Keyboard and Display MMIO          #
+#       and the Bitmap Display to be connected to MIPS.              #
+#								     #
+#       Bitmap Display Settings:                                     #
+#	Unit Width: 8						     #
+#	Unit Height: 8						     #
+#	Display Width: 512					     #
+#	Display Height: 512					     #
+#	Base Address for Display: 0x10008000 ($gp)		     #
+######################################################################
+
+######################################################################
+#			Changes Made				     #
+######################################################################
+# Major Change: Added a roaming 3x3 danger zone
+# Minor Change: Reversed the default colors of everything (light mode)
+# Unexpected Change: Fruits will randomly speed up the game breifly
+# Optimization: DrawBorder is faster and has less loops. 
+#		The program doesn't have to read from memory anymore to 
+#		get the color and width/height values. 
+#		Some jumps are removed to make pipelining better
+
+
+######################################################################
+#			Student Edits				     #
+######################################################################
+# Hayden Brimage: Wrote the roaming danger zone
+# Timothy Farley: Optimization: replaced color and width/height variables with values and got 
+#				rid of jumps to CoordinateToAddress and DrawPixels
+# Michael:
+# Gavin: 	Rewrote and optimized the DrawBorder sub-routine. Does vertical lines together
+#		and the horizontal lines together. Went from 4 loops to 2 loops.
+
+.data
+
+#Game Core information
+
+#Screen 
+#screenWidth: 64
+#screenHeight: 64
+
+#Colors
+#snakeColor: 	  0xff9933	 # orange
+#backgroundColor: 0xffffff	 # white
+#borderColor:     0xff00ff	 # pink	
+#fruitColor: 	  0x3399ee	 # blue
+#dangerColor:	  0xff5733	 # red
+
+#score variable
+score: 		.word 0
+#stores how many points are recieved for eating a fruit
+#increases as program gets harder
+scoreGain:	.word 10
+#speed the snake moves at, increases as game progresses
+gameSpeed:	.word 50
+# if the unexpected bonus speed is active or inactive
+bonusSpeedCheck: .word 0
+#array to store the scores in which difficulty should increase
+scoreMilestones: .word 100, 250, 500, 1000, 5000, 10000
+scoreArrayPosition: .word 0
+#end game message
+lostMessage:	.asciiz "You have died.... Your score was: "
+replayMessage:	.asciiz "Would you like to replay?"
+
+#Snake Information
+snakeHeadX: 	.word 31
+snakeHeadY:	.word 31
+snakeTailX:	.word 31
+snakeTailY:	.word 37
+direction:	.word 119 #initially moving up
+tailDirection:	.word 119
+# direction variable
+# 119 - moving up - W
+# 115 - moving down - S
+# 97 - moving left - A
+# 100 - moving right - D
+# numbers are selected due to ASCII characters
+
+#this array stores the screen coordinates of a direction change
+#once the tail hits a position in this array, its direction is changed
+#this is used to have the tail follow the head correctly
+directionChangeAddressArray:	.word 0:100
+#this stores the new direction for the tail to move once it hits
+#an address in the above array
+newDirectionChangeArray:	.word 0:100
+#stores the position of the end of the array (multiple of 4)
+arrayPosition:			.word 0
+locationInArray:		.word 0
+
+#Danger Zone Information
+dangerZoneX:	.word 25
+dangerZoneY:	.word 25
+dangerZoneTimer:	.word 0
+dangerZoneDirection:	.word 1 # 1 - up
+			        # 2 - right
+			        # 3 - down
+			        # 4 - left
+
+#Fruit Information
+fruitPositionX: .word
+fruitPositionY: .word
+
+.text
+
+main:
+######################################################
+# Fill Screen to Black, for reset
+######################################################
+	li $a0, 64 # sets $a0 to screen width/height
+	li $a1, 0xffffff # sets background color
+	mul $a2, $a0, $a0 #total number of pixels on screen
+	mul $a2, $a2, 4 #align addresses
+	add $a2, $a2, $gp #add base of gp
+	add $a0, $gp, $zero #loop counter
+FillLoop:
+	beq $a0, $a2, Init
+	sw $a1, 0($a0) #store color
+	addiu $a0, $a0, 4 #increment counter
+	j FillLoop
+
+######################################################
+# Initialize Variables
+######################################################
+Init:
+
+	li $t0, 31
+	sw $t0, snakeHeadX
+	sw $t0, snakeHeadY
+	sw $t0, snakeTailX
+	li $t0, 37
+	sw $t0, snakeTailY
+	li $t0, 119
+	sw $t0, direction
+	sw $t0, tailDirection
+	li $t0, 10
+	sw $t0, scoreGain
+	li $t0, 50
+	sw $t0, gameSpeed
+	sw $zero, arrayPosition
+	sw $zero, locationInArray
+	sw $zero, scoreArrayPosition
+	sw $zero, score
+	li $t0, 25
+	sw $t0, dangerZoneX
+	sw $t0, dangerZoneY
+	li $t0, 0
+	sw $t0, dangerZoneTimer
+	sw $t0, dangerZoneDirection
+	
+ClearRegisters:
+
+	li $v0, 0
+	li $a0, 0
+	li $a1, 0
+	li $a2, 0
+	li $a3, 0
+	li $t0, 0
+	li $t1, 0
+	li $t2, 0
+	li $t3, 0
+	li $t4, 0
+	li $t5, 0
+	li $t6, 0
+	li $t7, 0
+	li $t8, 0
+	li $t9, 0
+	li $s1, 0
+	li $s3, 0
+	li $s4, 0		
+
+######################################################
+# Draw Border
+######################################################
+
+# main fucn call
+# DrawBorder: Draws a full border around the 64x64 screen
+DrawBorder:
+    li $t0, 0              # start at y = 0
+LR_loop:
+    li $t1, 0                  # jump to the left side
+    move $a0, $t1 		# loads x val into $a0
+    move $a1, $t0		# loads y val into $a1
+    #get screen coordinates
+    li $v0, 64 #Store screen width into $v0
+    mul $v0, $v0, $a1	#multiply by y position
+    add $v0, $v0, $a0	#add the x position
+    mul $v0, $v0, 4	#multiply by 4
+    add $v0, $v0, $gp	#add global pointerfrom bitmap display
+    move $a0, $v0 # move screen coordinates into $a0
+    li $a1, 0xff00ff # sets border color
+    sw $a1, ($a0) 	#fill the coordinate with specified color
+
+    li $t1, 63                 # jump to the right side
+    move $a0, $t1
+    move $a1, $t0
+    #get screen coordinates
+    li $v0, 64 #Store screen width into $v0
+    mul $v0, $v0, $a1	#multiply by y position
+    add $v0, $v0, $a0	#add the x position
+    mul $v0, $v0, 4	#multiply by 4
+    add $v0, $v0, $gp	#add global pointerfrom bitmap display
+    move $a0, $v0 # move screen coordinates into $a0
+    li $a1, 0xff00ff # sets border color
+    sw $a1, ($a0) 	#fill the coordinate with specified color
+
+    addi $t0, $t0, 1           # incremenmt the y
+    bne $t0, 64, LR_loop	# restart the loop if it hasn't finished
+
+    li $t1, 0              # start at x = 0
+TB_loop:
+    li $t0, 0                  # jump to the top
+    move $a0, $t1	# loads x val into $a0
+    move $a1, $t0	# loads y val into $a1
+    #get screen coordinates
+    li $v0, 64 #Store screen width into $v0
+    mul $v0, $v0, $a1	#multiply by y position
+    add $v0, $v0, $a0	#add the x position
+    mul $v0, $v0, 4	#multiply by 4
+    add $v0, $v0, $gp	#add global pointerfrom bitmap display
+    move $a0, $v0 # move screen coordinates into $a0
+    li $a1, 0xff00ff # sets border color
+    sw $a1, ($a0) 	#fill the coordinate with specified color
+
+    li $t0, 63                 # jump to the bottom
+    move $a0, $t1
+    move $a1, $t0
+    #get screen coordinates
+    li $v0, 64 #Store screen width into $v0
+    mul $v0, $v0, $a1	#multiply by y position
+    add $v0, $v0, $a0	#add the x position
+    mul $v0, $v0, 4	#multiply by 4
+    add $v0, $v0, $gp	#add global pointerfrom bitmap display
+    move $a0, $v0 # move screen coordinates into $a0
+    li $a1, 0xff00ff # sets border color
+    sw $a1, ($a0) 	#fill the coordinate with specified color
+
+    addi $t1, $t1, 1           # increment the x
+    bne $t1, 64, TB_loop	# restart the loop if it hasn't finished
+	
+######################################################
+# Draw Initial Snake Position
+######################################################
+	#draw snake head
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, 31	#multiply by y position
+	add $v0, $v0, 31	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	#draw middle portion
+	lw $a0, snakeHeadX #load x coordinate
+	lw $a1, snakeHeadY #load y coordinate
+	add $a1, $a1, 1
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	#TEST 8 PIXELS
+	lw $a0, snakeHeadX #load x coordinate
+	lw $a1, snakeHeadY #load y coordinate
+	add $a1, $a1, 2
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	lw $a0, snakeHeadX #load x coordinate
+	lw $a1, snakeHeadY #load y coordinate
+	add $a1, $a1, 3
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel	
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	lw $a0, snakeHeadX #load x coordinate
+	lw $a1, snakeHeadY #load y coordinate
+	add $a1, $a1, 4
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	lw $a0, snakeHeadX #load x coordinate
+	lw $a1, snakeHeadY #load y coordinate
+	add $a1, $a1, 5
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	lw $a0, snakeHeadX #load x coordinate
+	lw $a1, snakeHeadY #load y coordinate
+	add $a1, $a1, 6
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	#draw snake tail
+	lw $a0, snakeTailX #load x coordinate
+	lw $a1, snakeTailY #load y coordinate
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff9933 # sets snake color #store color into $a1
+	#draw color at pixel
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+######################################################
+# Spawn Fruit
+######################################################	
+SpawnFruit:
+	#syscall for random int with a upper bound
+	li $v0, 42
+	#upper bound 61 (0 <= $a0 < $a1)
+	li $a1, 62
+	syscall
+	#increment the X position so it doesnt draw on a border
+	addiu $a0, $a0, 1
+	#store X position
+	sw $a0, fruitPositionX
+	syscall
+	#increment the Y position so it doesnt draw on a border
+	addiu $a0, $a0, 1
+	#store Y position
+	sw $a0, fruitPositionY
+	jal IncreaseDifficulty
+	
+######################################################
+# Check for Direction Change
+######################################################
+
+InputCheck:
+	lw $a0, gameSpeed
+	jal Pause
+
+#get the coordinates for direction change if needed
+	lw $a0, snakeHeadX
+	lw $a1, snakeHeadY
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a2, $v0, $zero
+
+	#get the input from the keyboard
+	li $t0, 0xffff0000
+	lw $t1, ($t0)
+	andi $t1, $t1, 0x0001
+	beqz $t1, SelectDrawDirection #if no new input, draw in same direction
+	lw $a1, 4($t0) #store direction based on input
+	
+DirectionCheck:	
+	lw $a0, direction # load current direction into #a0
+
+	jal CheckDirection	#check to see if the direction is valid
+	beqz $v0, InputCheck	#if input is not valid, get new input
+	sw $a1, direction	#store the new direction if valid
+	lw $t7, direction	#store the direction into $t7
+
+######################################################
+# Update Snake Head position
+######################################################	
+			
+SelectDrawDirection:
+	#check to see which direction to draw
+	beq $t7, 119, DrawUpLoop
+	beq  $t7, 115, DrawDownLoop
+	beq  $t7, 97, DrawLeftLoop
+	beq  $t7, 100, DrawRightLoop
+	#jump back to get input if an unsupported key was pressed
+	j InputCheck
+	
+DrawUpLoop:
+	#check for collision before moving to next pixel
+	lw $a0, snakeHeadX
+	lw $a1, snakeHeadY
+	lw $a2, direction
+	jal CheckGameEndingCollision
+	#draw head in new position, move Y position up
+	lw $t0, snakeHeadX
+	lw $t1, snakeHeadY
+	addiu $t1, $t1, -1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+
+	sw  $t1, snakeHeadY
+	j UpdateTailPosition #head updated, update tail
+	
+DrawDownLoop:
+	#check for collision before moving to next pixel
+	lw $a0, snakeHeadX
+	lw $a1, snakeHeadY
+	lw $a2, direction	
+	jal CheckGameEndingCollision
+	#draw head in new position, move Y position down
+	lw $t0, snakeHeadX
+	lw $t1, snakeHeadY
+	addiu $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	sw  $t1, snakeHeadY	
+	j UpdateTailPosition #head updated, update tail
+
+DrawLeftLoop:
+	#check for collision before moving to next pixel
+	lw $a0, snakeHeadX
+	lw $a1, snakeHeadY
+	lw $a2, direction	
+	jal CheckGameEndingCollision
+	#draw head in new position, move X position left
+	lw $t0, snakeHeadX
+	lw $t1, snakeHeadY
+	addiu $t0, $t0, -1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	sw  $t0, snakeHeadX	
+	j UpdateTailPosition #head updated, update tail
+
+DrawRightLoop:
+	#check for collision before moving to next pixel
+	lw $a0, snakeHeadX
+	lw $a1, snakeHeadY
+	lw $a2, direction	
+	jal CheckGameEndingCollision
+	#draw head in new position, move X position right
+	lw $t0, snakeHeadX
+	lw $t1, snakeHeadY
+	addiu $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	sw  $t0, snakeHeadX
+	j UpdateTailPosition #head updated, update tail
+
+######################################################
+# Update Snake Tail Position
+######################################################	
+			
+UpdateTailPosition:	
+	lw $t2, tailDirection
+	#branch based on which direction tail is moving
+	beq  $t2, 119, MoveTailUp
+	beq  $t2, 115, MoveTailDown
+	beq  $t2, 97, MoveTailLeft
+	beq  $t2, 100, MoveTailRight
+
+MoveTailUp:
+	#get the screen coordinates of the next direction change
+	lw $t8, locationInArray
+	la $t0, directionChangeAddressArray #get direction change coordinate
+	add $t0, $t0, $t8
+	lw $t9, 0($t0)
+	lw $a0, snakeTailX  #get snake tail position
+	lw $a1, snakeTailY
+	#if the index is out of bounds, set back to zero
+	beq $s1, 1, IncreaseLengthUp #branch if length should be increased
+	addiu $a1, $a1, -1 #change tail position if no length change
+	sw $a1, snakeTailY
+	
+IncreaseLengthUp:
+	li $s1, 0 #set flag back to false
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	bne $t9, $a0, DrawTailUp #change direction if needed
+	la $t3, newDirectionChangeArray  #update direction
+	add $t3, $t3, $t8
+	lw $t9, 0($t3)
+	sw $t9, tailDirection
+	addiu $t8,$t8,4
+	#if the index is out of bounds, set back to zero
+	bne $t8, 396, StoreLocationUp
+	li $t8, 0
+StoreLocationUp:
+	sw $t8, locationInArray 
+DrawTailUp:
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	#erase behind the snake
+	lw $t0, snakeTailX
+	lw $t1, snakeTailY
+	addiu $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	j DrawDangerZone  #finished updating snake, update fruit
+
+MoveTailDown:
+	#get the screen coordinates of the next direction change
+	lw $t8, locationInArray
+	la $t0, directionChangeAddressArray #get direction change coordinate
+	add $t0, $t0, $t8
+	lw $t9, 0($t0)
+	lw $a0, snakeTailX  #get snake tail position
+	lw $a1, snakeTailY
+	beq $s1, 1, IncreaseLengthDown #branch if length should be increased
+	addiu $a1, $a1, 1 #change tail position if no length change
+	sw $a1, snakeTailY
+	
+IncreaseLengthDown:
+	li $s1, 0 #set flag back to false
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	bne $t9, $a0, DrawTailDown #change direction if needed
+	la $t3, newDirectionChangeArray  #update direction
+	add $t3, $t3, $t8
+	lw $t9, 0($t3)
+	sw $t9, tailDirection
+	addiu $t8,$t8,4
+	#if the index is out of bounds, set back to zero
+	bne $t8, 396, StoreLocationDown
+	li $t8, 0
+StoreLocationDown:
+	sw $t8, locationInArray  
+DrawTailDown:
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	#erase behind the snake
+	lw $t0, snakeTailX
+	lw $t1, snakeTailY
+	addiu $t1, $t1, -1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	j DrawDangerZone #finished updating snake, update fruit
+
+MoveTailLeft:
+	#update the tail position when moving left
+	lw $t8, locationInArray
+	la $t0, directionChangeAddressArray #get direction change coordinate
+	add $t0, $t0, $t8
+	lw $t9, 0($t0)
+	lw $a0, snakeTailX #get snake tail position
+	lw $a1, snakeTailY
+	beq $s1, 1, IncreaseLengthLeft #branch if length should be increased
+	addiu $a0, $a0, -1 #change tail position if no length change
+	sw $a0, snakeTailX
+	
+IncreaseLengthLeft:
+	li $s1, 0 #set flag back to false
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	bne $t9, $a0, DrawTailLeft #change direction if needed
+	la $t3, newDirectionChangeArray #update direction
+	add $t3, $t3, $t8
+	lw $t9, 0($t3)
+	sw $t9, tailDirection
+	addiu $t8,$t8,4
+	#if the index is out of bounds, set back to zero
+	bne $t8, 396, StoreLocationLeft
+	li $t8, 0
+StoreLocationLeft:
+	sw $t8, locationInArray  
+DrawTailLeft:	
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	#erase behind the snake
+	lw $t0, snakeTailX
+	lw $t1, snakeTailY
+	addiu $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color	
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	j DrawDangerZone  #finished updating snake, update fruit
+
+MoveTailRight:
+	#get the screen coordinates of the next direction change
+	lw $t8, locationInArray
+	#get the base address of the coordinate array
+	la $t0, directionChangeAddressArray
+	#go to the correct index of array
+	add $t0, $t0, $t8
+	#get the data from the array
+	lw $t9, 0($t0)
+	#get current tail position
+	lw $a0, snakeTailX
+	lw $a1, snakeTailY
+	#if the length needs to be increased
+	#do not change coordinates
+	beq $s1, 1, IncreaseLengthRight
+	#change tail position
+	addiu $a0, $a0, 1
+	#store new tail position
+	sw $a0, snakeTailX
+	
+IncreaseLengthRight:
+	li $s1, 0 #set flag back to false
+	#get screen coordinates
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	#store coordinates in $a0
+	add $a0, $v0, $zero
+	#if the coordinates is a position change 
+	#continue drawing tail in same direction
+	bne $t9, $a0, DrawTailRight
+	#get the base address of the direction change array
+	la $t3, newDirectionChangeArray
+	#move to correct index in array
+	add $t3, $t3, $t8
+	#get data from array
+	lw $t9, 0($t3)
+	#store new direction
+	sw $t9, tailDirection
+	#increment position in array
+	addiu $t8,$t8,4
+	#if the index is out of bounds, set back to zero
+	bne $t8, 396, StoreLocationRight
+	li $t8, 0
+StoreLocationRight:
+	sw $t8, locationInArray  
+DrawTailRight:	
+
+	li $a1, 0xff9933 # sets snake color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	#erase behind the snake
+	lw $t0, snakeTailX
+	lw $t1, snakeTailY
+	addiu $t0, $t0, -1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	j DrawDangerZone  #finished updating snake, update fruit
+
+######################################################
+# Update Danger Zone position
+######################################################	
+DrawDangerZone:
+	lw $t0, dangerZoneTimer # grab the timer
+	beqz $t0, DangerZoneChartPath # if it's zero, chart a path
+	subi $t0, $t0, 1
+	sw $t0, dangerZoneTimer
+	j DangerZoneCheckMove # else, continue on the current path
+
+DangerZoneChartPath:
+	# Set a random timer for the path
+	#syscall for random int with a upper bound
+	li $v0, 42
+	#upper bound 15 (0 <= $a0 < $a1)
+	li $a1, 15
+	syscall
+	add $a0, $a0, 10 # add 10 to prevent low results
+	sw $a1, dangerZoneTimer # store the timer
+	
+	# Set a random direction for the path
+	li $v0, 42
+	#upper bound 3 (0 <= $a0 < $a1)
+	li $a0, 10
+	li $a1, 4
+	syscall
+	add $a0, $a0, 1 # add 10 to prevent low results
+	sw $a0, dangerZoneDirection # store the direction
+
+DangerZoneCheckMove:
+	lw $t0, dangerZoneDirection # grab our direction and move accordingly
+	beq $t0, 1, DangerZoneUp
+	beq $t0, 2, DangerZoneRight
+	beq $t0, 3, DangerZoneDown
+	beq $t0, 4, DangerZoneLeft
+
+DangerZoneUp:
+	# Scan two pixels up for the border
+	# if a border was found, chart a new path
+	lw $t0, dangerZoneY
+	blt $t0, 4, DangerZoneChartPath
+	# if no border was detected, we move upwards
+	# clear the three pixels below #
+	# Directly below
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Below and to the left
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t0, $t0, 1
+	addi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display=
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Below and to the right
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t0, $t0, 1
+	addi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Move the main cell up
+	lw $t0, dangerZoneY
+	subi $t0, $t0, 1
+	sw $t0, dangerZoneY
+	
+	# draw the danger zone
+	j DrawDanger3x3
+	
+DangerZoneRight:
+	# Scan two pixels right for the border
+	# if a border was found, chart a new path
+	lw $t0, dangerZoneX
+	bgt $t0, 60, DangerZoneChartPath
+	# if no border was detected, we move right
+	# clear the three pixels to the left #
+	# Directly left
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Below and to the left
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t0, $t0, 1
+	addi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Above and to the left
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t0, $t0, 1
+	subi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Move the main cell right
+	lw $t0, dangerZoneX
+	addi $t0, $t0, 1
+	sw $t0, dangerZoneX
+	
+	# draw the danger zone
+	j DrawDanger3x3
+
+DangerZoneDown:
+	# Scan two pixels up for the border
+	# if a border was found, chart a new path
+	lw $t0, dangerZoneY
+	bgt $t0, 60, DangerZoneChartPath
+	# if no border was detected, we move upwards
+	# clear the three pixels below #
+	# Directly above
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# above and to the left
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t0, $t0, 1
+	subi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# above and to the right
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t0, $t0, 1
+	subi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Move the main cell down
+	lw $t0, dangerZoneY
+	addi $t0, $t0, 1
+	sw $t0, dangerZoneY
+	
+	# draw the danger zone
+	j DrawDanger3x3
+	
+DangerZoneLeft:
+	# Scan two pixels right for the border
+	# if a border was found, chart a new path
+	lw $t0, dangerZoneX
+	blt $t0, 3, DangerZoneChartPath
+	# if no border was detected, we move right
+	# clear the three pixels to the left #
+	# Directly right
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Below and to the right
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t0, $t0, 1
+	addi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Above and to the right
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t0, $t0, 1
+	subi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0xffffff # sets background color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Move the main cell left
+	lw $t0, dangerZoneX
+	subi $t0, $t0, 1
+	sw $t0, dangerZoneX
+	
+	# draw the danger zone
+	j DrawDanger3x3
+
+DrawDanger3x3:
+	# Middle Row #
+	# Draw main cell
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	# left cell
+	subi $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	# right cell
+	addi $t0, $t0, 2
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Top Row #
+	# Draw main cell
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	subi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	# left cell
+	subi $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	# right cell
+	addi $t0, $t0, 2
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	# Bottom Row #
+	# Draw main cell
+	lw $t0, dangerZoneX
+	lw $t1, dangerZoneY
+	addi $t1, $t1, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	# left cell
+	subi $t0, $t0, 1
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	# right cell
+	addi $t0, $t0, 2
+	add $a0, $t0, $zero
+	add $a1, $t1, $zero
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	move $a0, $v0 #copy coordinates to $a0
+	li $a1, 0xff5733 # sets square color
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	
+	j DrawFruit
+	
+######################################################
+# Draw Fruit
+######################################################	
+DrawFruit:
+	#check collision with fruit
+	lw $a0, snakeHeadX
+	lw $a1, snakeHeadY
+	jal CheckFruitCollision
+	beq $v0, 1, AddLength #if fruit was eaten, add length
+
+	#draw the fruit
+	lw $a0, fruitPositionX
+	lw $a1, fruitPositionY
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	add $a0, $v0, $zero
+	li $a1, 0x3399ee
+	sw $a1, ($a0) 	#fill the coordinate with specified color
+	j InputCheck
+	
+AddLength:
+	li $s1, 1 #flag to increase snake length
+	j SpawnFruit
+
+j InputCheck #shouldn't need, but there in case of errors
+
+##################################################################
+#CoordinatesToAddress Function
+# $a0 -> x coordinate
+# $a1 -> y coordinate
+##################################################################
+# returns $v0 -> the address of the coordinates for bitmap display
+##################################################################
+#CoordinateToAddress:
+#	li $v0, 64 		#Store screen width into $v0
+#	mul $v0, $v0, $a1	#multiply by y position
+#	add $v0, $v0, $a0	#add the x position
+#	mul $v0, $v0, 4		#multiply by 4
+#	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+#	jr $ra			# return $v0
+
+##################################################################
+#Draw Function
+# $a0 -> Address position to draw at
+# $a1 -> Color the pixel should be drawn
+##################################################################
+# no return value
+##################################################################
+#DrawPixel:
+#	sw $a1, ($a0) 	#fill the coordinate with specified color
+#	jr $ra		#return
+	
+##################################################################
+# Check Acceptable Direction
+# $a0 - current direction
+# $a1 - input
+# $a2 - coordinates of direction change if acceptable
+##################################################################
+# return $v0 = 0 - direction unacceptable
+#	 $v0 = 1 - direction is acceptable
+##################################################################
+CheckDirection:
+	beq $a0, $a1, Same  #if the input is the same as current direction
+				#continue moving in the direction
+	beq $a0, 119, checkIsDownPressed #if  moving up, check to see if down is pressed
+	beq $a0, 115, checkIsUpPressed	#if moving down, check to see if up is pressed
+	beq $a0, 97, checkIsRightPressed #if moving left, check to see if right is pressed
+	beq $a0, 100, checkIsLeftPressed #if moving right, check to see if left is pressed
+	j DirectionCheckFinished # if input is incorrect, get new input
+	
+checkIsDownPressed:
+	beq $a1, 115, unacceptable #if down is pressed while moving up
+	#prevent snake from moving into itself
+	j acceptable
+
+checkIsUpPressed:
+	beq $a1, 119, unacceptable #if up is pressed while moving down
+	#prevent snake from moving into itself
+	j acceptable
+
+checkIsRightPressed:
+	beq $a1, 100, unacceptable #if right is pressed while moving left
+	#prevent snake from moving into itself
+	j acceptable
+	
+checkIsLeftPressed:
+	beq $a1, 97, unacceptable #if left is pressed while moving right
+	#prevent snake from moving into itself
+	j acceptable
+	
+acceptable:
+	li $v0, 1
+	
+	beq $a1, 119, storeUpDirection  #store the location of up direction change
+	beq $a1, 115, storeDownDirection #store the location of down direction change	
+	beq $a1, 97, storeLeftDirection  #store the location of left direction change
+	beq $a1, 100, storeRightDirection #store the location of right direction change
+	j DirectionCheckFinished
+	
+storeUpDirection:
+	lw $t4, arrayPosition #get the array index
+	la $t2, directionChangeAddressArray #get the address for the coordinate for direction change
+	la $t3, newDirectionChangeArray #get address for new direction
+	add $t2, $t2, $t4 #add the index to the base
+	add $t3, $t3, $t4
+		
+	sw $a2, 0($t2) #store the coordinates in that index
+	li $t5, 119
+	sw $t5, 0($t3) #store the direction in that index
+	
+	addiu $t4, $t4, 4 #increment the array index
+	#if the array will go out of bounds, start it back at 0
+	bne $t4, 396, UpStop
+	li $t4, 0
+UpStop:
+	sw $t4, arrayPosition	
+	j DirectionCheckFinished
+	
+storeDownDirection:
+	lw $t4, arrayPosition #get the array index
+	la $t2, directionChangeAddressArray #get the address for the coordinate for direction change
+	la $t3, newDirectionChangeArray #get address for new direction
+	add $t2, $t2, $t4 #add the index to the base
+	add $t3, $t3, $t4
+	
+	sw $a2, 0($t2) #store the coordinates in that index
+	li $t5, 115
+	sw $t5, 0($t3) #store the direction in that index
+
+	addiu $t4, $t4, 4 #increment the array index
+	#if the array will go out of bounds, start it back at 0
+	bne $t4, 396, DownStop
+	li $t4, 0
+
+DownStop:	
+	sw $t4, arrayPosition
+	j DirectionCheckFinished
+
+storeLeftDirection:
+	lw $t4, arrayPosition #get the array index
+	la $t2, directionChangeAddressArray #get the address for the coordinate for direction change
+	la $t3, newDirectionChangeArray #get address for new direction
+	add $t2, $t2, $t4 #add the index to the base
+	add $t3, $t3, $t4
+
+	sw $a2, 0($t2) #store the coordinates in that index
+	li $t5, 97
+	sw $t5, 0($t3) #store the direction in that index
+
+	addiu $t4, $t4, 4 #increment the array index
+	#if the array will go out of bounds, start it back at 0
+	bne $t4, 396, LeftStop
+	li $t4, 0
+
+LeftStop:
+	sw $t4, arrayPosition
+	j DirectionCheckFinished
+
+storeRightDirection:
+	lw $t4, arrayPosition #get the array index
+	la $t2, directionChangeAddressArray #get the address for the coordinate for direction change
+	la $t3, newDirectionChangeArray #get address for new direction
+	add $t2, $t2, $t4 #add the index to the base
+	add $t3, $t3, $t4
+	
+	sw $a2, 0($t2) #store the coordinates in that index
+	li $t5, 100
+	sw $t5, 0($t3) #store the direction in that index
+
+	addiu $t4, $t4, 4 #increment the array index
+	#if the array will go out of bounds, start it back at 0
+	bne $t4, 396, RightStop
+	li $t4, 0
+
+RightStop:
+	#store array position
+	sw $t4, arrayPosition		
+	j DirectionCheckFinished
+	
+unacceptable:
+	li $v0, 0 #direction is not acceptable
+	j DirectionCheckFinished
+	
+Same:
+	li $v0, 1
+	
+DirectionCheckFinished:
+	jr $ra
+	
+##################################################################
+# Pause Function
+# $a0 - amount to pause
+##################################################################
+# no return values
+##################################################################
+Pause:
+	li $v0, 32 #syscall value for sleep
+	syscall
+	jr $ra
+	
+##################################################################
+# Check Fruit Collision
+# $a0 - snakeHeadPositionX
+# $a1 - snakeHeadPositionY
+##################################################################
+# returns $v0:
+#	0 - does not hit fruit
+#	1 - does hit fruit
+##################################################################
+CheckFruitCollision:
+	
+	#get fruit coordinates
+	lw $t0, fruitPositionX
+	lw $t1, fruitPositionY
+	#set $v0 to zero, to default to no collision
+	add $v0, $zero, $zero	
+	#check first to see if x is equal
+	beq $a0, $t0, XEqualFruit
+	#if not equal end function
+	j ExitCollisionCheck
+	
+XEqualFruit:
+	#check to see if the y is equal
+	beq $a1, $t1, YEqualFruit
+	#if not eqaul end function
+	j ExitCollisionCheck
+YEqualFruit:
+	#update the score as fruit has been eaten
+	lw $t5, score
+	lw $t6, scoreGain
+	add $t5, $t5, $t6
+	sw $t5, score
+	# play sound to signify score update
+	li $v0, 31
+	li $a0, 79
+	li $a1, 150
+	li $a2, 7
+	li $a3, 127
+	syscall	
+	
+	li $a0, 96
+	li $a1, 250
+	li $a2, 7
+	li $a3, 127
+	syscall
+	
+	li $a0, 96
+	li $a1, 250
+	li $a2, 7
+	li $a3, 127
+	syscall
+		
+	lw $t5, bonusSpeedCheck # load variable to see if bonus speed is active (0=false 1=true)
+	beq $t5, 1, regSpeed # if true, branch to change back to regular speed 
+	
+	li $v0, 42	# syscall for random number
+	li $a1, 2	# random number has an upper bound of 2 (0 <= a0 < a1)
+	syscall
+	li $v0, 1 	# set return value to 1 for fruit collision
+	bgt $a0, 0, ExitCollisionCheck # if the random number is greater than 0, it does not increase the game speed and exits 
+	# the code that increase the speed of the game
+	li $t5, 1 	# set variable to 1
+	sw $t5, bonusSpeedCheck # setting bonuseSpeedCheck to 1 to signify that it it true
+	li $t5, 20	# set variable to 20
+	sw $t5, gameSpeed # set the gameSpeed value to 20 to decrease the time between each tick to 20 (increases the game speed) 
+	j ExitCollisionCheck # jump to exit function
+	
+regSpeed: # the function returns the game speed to default speed
+	li $t5, 0 	# set variable to 0
+	sw $t5, bonusSpeedCheck # setting bonuseSpeedCheck to 0 to signify that it it false
+	li $t5, 50 	# set variable to 50
+	sw $t5, gameSpeed # set the gameSpeed value to 50 to increase the time between each tick to 500 (decreases the game speed)
+	li $v0, 1 	# set return value to 1 for fruit collision
+	j ExitCollisionCheck # jump to exit function
+	
+ExitCollisionCheck:
+	jr $ra
+	
+##################################################################
+# Check Snake Body Collision
+# $a0 - snakeHeadPositionX
+# $a1 - snakeHeadPositionY
+# $a2 - snakeHeadDirection
+##################################################################
+# returns $v0:
+#	0 - does not hit body
+#	1 - does hit body
+##################################################################	
+CheckGameEndingCollision:
+	#save head coordinates
+	add $s3, $a0, $zero
+	add $s4, $a1, $zero
+	#save return address
+	sw $ra, 0($sp)
+
+	beq  $a2, 119, CheckUp
+	beq  $a2, 115, CheckDown
+	beq  $a2, 97,  CheckLeft
+	beq  $a2, 100, CheckRight
+	j BodyCollisionDone #for error?
+	
+CheckUp:
+	#look above the current position
+	addiu $a1, $a1, -1
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	#get color at screen address
+	lw $t1, 0($v0)
+	li $a1, 0xff9933 # sets snake color
+	li $t3, 0xff00ff # sets border color
+	beq $t1, $t2, Exit #If colors are equal - YOU LOST!
+	beq $t1, $t3, Exit #If you hit the border - YOU LOST!
+	li $t3, 0xff5733 # sets square color
+	beq $t1, $t3, Exit #If you hit the danger zone - YOU LOST!
+	j BodyCollisionDone # if not, leave function
+
+CheckDown:
+
+	#look below the current position
+	addiu $a1, $a1, 1
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	#get color at screen address
+	lw $t1, 0($v0)
+	li $t2, 0xff9933 # sets snake color
+	li $t3, 0xff00ff # sets border color
+	beq $t1, $t2, Exit #If colors are equal - YOU LOST!
+	beq $t1, $t3, Exit #If you hit the border - YOU LOST!
+	li $t3, 0xff5733 # sets square color
+	beq $t1, $t3, Exit #If you hit the danger zone - YOU LOST!
+	j BodyCollisionDone # if not, leave function
+
+CheckLeft:
+
+	#look to the left of the current position
+	addiu $a0, $a0, -1
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	#get color at screen address
+	lw $t1, 0($v0)
+	li $t2, 0xff9933 # sets snake color
+	li $t3, 0xff00ff # sets border color
+	beq $t1, $t2, Exit #If colors are equal - YOU LOST!
+	beq $t1, $t3, Exit #If you hit the border - YOU LOST!
+	li $t3, 0xff5733 # sets square color
+	beq $t1, $t3, Exit #If you hit the danger zone - YOU LOST!
+	j BodyCollisionDone # if not, leave function
+
+CheckRight:
+
+	#look to the right of the current position
+	addiu $a0, $a0, 1
+	li $v0, 64 #Store screen width into $v0
+	mul $v0, $v0, $a1	#multiply by y position
+	add $v0, $v0, $a0	#add the x position
+	mul $v0, $v0, 4		#multiply by 4
+	add $v0, $v0, $gp	#add global pointerfrom bitmap display
+	#get color at screen address
+	lw $t1, 0($v0)
+	li $t2, 0xff9933 # sets snake color
+	li $t3, 0xff00ff # sets border color
+	beq $t1, $t2, Exit #If colors are equal - YOU LOST!
+	beq $t1, $t3, Exit #If you hit the border - YOU LOST!
+	li $t3, 0xff5733 # sets square color
+	beq $t1, $t3, Exit #If you hit the danger zone - YOU LOST!
+	j BodyCollisionDone # if not, leave function
+
+BodyCollisionDone:
+	lw $ra, 0($sp) #restore return address
+	jr $ra		
+	
+##################################################################
+# Increase Difficulty Function
+# no parameters
+##################################################################
+# no return values
+##################################################################
+IncreaseDifficulty:
+	lw $t0, score #get the player's score
+	la $t1, scoreMilestones #get the milestones base address
+	lw $t2, scoreArrayPosition #get the array position
+	add $t1, $t1, $t2 #move to position in array
+	lw $t3, 0($t1) #get the value at the array index
+	
+	#if the player score is not equal to the current milestone
+	#exit the function, if they are equal increase difficulty
+	bne $t3, $t0, FinishedDiff 
+	#increase the index for the milestones array
+	addiu $t2, $t2, 4
+	#store new position
+	sw $t2, scoreArrayPosition
+	#load the scoreGain variable to increase the
+	#points awarded for eating fruit
+	lw $t0, scoreGain
+	#multiply gain by 2
+	sll $t0, $t0, 1 
+	#load the game speed
+	lw $t1, gameSpeed
+	#subtract 25 from the move speed
+	addiu $t1, $t1, -25
+	#store new speed
+	sw $t1, gameSpeed
+
+FinishedDiff:
+	jr $ra
+
+Exit:   
+	#play a sound tune to signify game over
+	li $v0, 31
+	li $a0, 28
+	li $a1, 250
+	li $a2, 32
+	li $a3, 127
+	syscall
+		
+	li $a0, 33
+	li $a1, 250
+	li $a2, 32
+	li $a3, 127
+	syscall
+	
+	li $a0, 47
+	li $a1, 1000
+	li $a2, 32
+	li $a3, 127
+	syscall
+	
+	li $v0, 56 #syscall value for dialog
+	la $a0, lostMessage #get message
+	lw $a1, score	#get score
+	syscall
+	
+	li $v0, 50 #syscall for yes/no dialog
+	la $a0, replayMessage #get message
+	syscall
+	
+	beqz $a0, main#jump back to start of program
+	#end program
+	li $v0, 10
+	syscall
